@@ -1,14 +1,16 @@
 ﻿
-
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Configuration;
 using SQL_AE_Test.Data;
 
-var configuration = new ConfigurationBuilder()
+var builder = new ConfigurationBuilder()
 	.SetBasePath(Directory.GetCurrentDirectory())
-	.AddJsonFile("appsettings.json", optional: false, reloadOnChange: true)
-	.Build();
+	.AddJsonFile("appsettings.json", optional: true, reloadOnChange: true)
+	.AddUserSecrets(System.Reflection.Assembly.GetExecutingAssembly(), optional: true)
+	.AddEnvironmentVariables();
+
+var configuration = builder.Build();
 
 var services = new ServiceCollection();
 services.AddDbContext<AppDbContext>(options =>

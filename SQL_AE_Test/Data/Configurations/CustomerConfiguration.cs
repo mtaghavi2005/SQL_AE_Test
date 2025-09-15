@@ -12,15 +12,9 @@ namespace SQL_AE_Test.Data.Configurations
 
             builder.Property(e => e.SSN);
             
-            builder.Property(e => e.BirthDate)
-                .IsRequired();
             
             builder.Property(e => e.Description)
                 .HasMaxLength(500);
-
-            builder.Property(e => e.SSN);
-
-            builder.Property(e => e.BirthDate);
         }
     }
 }

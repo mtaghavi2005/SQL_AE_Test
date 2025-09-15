@@ -30,9 +30,9 @@ namespace SQL_AE_Test.Migrations
 
                     SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Id"));
 
-                    b.Property<DateTime>("BirthDate")
+                    b.Property<DateTime?>("BirthDate")
                         .HasColumnType("datetime2")
-                        .HasAnnotation("AE:CekName", "CEK_App")
+                        .HasAnnotation("AE:CekName", "CEK_PII")
                         .HasAnnotation("AE:Type", "Randomized");
 
                     b.Property<string>("Description")

@@ -475,4 +475,5 @@ Swagger.xml
 
 .config/dotnet-tools.json
 
-.github/**
+
+.env

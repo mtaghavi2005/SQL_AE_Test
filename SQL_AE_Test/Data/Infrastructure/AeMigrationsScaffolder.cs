@@ -131,64 +131,46 @@ namespace SQL_AE_Test.Data.Infrastructure
 
         private static string GeneratePowerShell(string migrationId, List<AeTarget> targets)
         {
-            // Emit a sidecar script that:
-            // - Takes AKV key URL, CMK name as inputs
-            // - Ensures CMK + referenced CEKs exist
-            // - Builds New-SqlColumnEncryptionSettings for each column
-            // - Calls Set-SqlColumnEncryption (optionally online)
             var sb = new StringBuilder();
 
             sb.AppendLine(@"param(
-  [Parameter(Mandatory=$true)] [string] $Server,     # e.g. myserver.database.windows.net
-  [Parameter(Mandatory=$true)] [string] $Database,   # e.g. MyDb
-  [Parameter(Mandatory=$true)] [string] $AkvKeyId,   # https://<vault>.vault.azure.net/keys/<key>/<version>
+  [Parameter(Mandatory=$true)] [string] $ConnectionString,
+  [Parameter(Mandatory=$true)] [string] $AkvKeyId,
+  [Parameter(Mandatory=$true)] [string] $ScriptRoot,
   [string] $CmkName = 'CMK_App',
   [switch] $UseOnlineApproach,
-  [int]    $MaxDowntimeInSeconds = 180,
+  [int] $MaxDowntimeInSeconds = 180,
   [string] $LogFileDirectory = $null
 )
 
-Import-Module SqlServer -MinimumVersion 22.0.50
+# Import the shared AE helper module from scripts folder
+$moduleFile = Join-Path $ScriptRoot 'scripts' 'AE-Helper.psm1'
+Import-Module $moduleFile -Force
 
-# Connect with AAD Default (Managed Identity / SPN / Developer token)
-$db = Get-SqlDatabase -ServerInstance ""tcp:$Server,1433"" -Name $Database
-
-# Ensure Column Master Key (AKV-backed)
-$cmkSettings = New-SqlAzureKeyVaultColumnMasterKeySettings -KeyUrl $AkvKeyId
-if (-not (Get-SqlColumnMasterKey -InputObject $db | Where-Object Name -eq $CmkName)) {
-  New-SqlColumnMasterKey -InputObject $db -Name $CmkName -ColumnMasterKeySettings $cmkSettings | Out-Null
-}
-");
-
-            // Ensure all CEKs
-            foreach (var cek in targets.Select(t => t.Cek).Distinct(StringComparer.OrdinalIgnoreCase))
-            {
-                sb.AppendLine($@"
-if (-not (Get-SqlColumnEncryptionKey -InputObject $db | Where-Object Name -eq '{cek}')) {{
-  New-SqlColumnEncryptionKey -InputObject $db -Name '{cek}' -ColumnMasterKeyName $CmkName | Out-Null
-}}");
-            }
-
-            sb.AppendLine(@"
-$ces = @()
-");
+# Convert targets to the format expected by the shared function
+$aeTargets = @(");
 
             foreach (var t in targets)
             {
-                // Quote the full name to be safe; New-SqlColumnEncryptionSettings expects three-part name
-                var fq = $"{t.Schema}.{t.Table}.{t.Column}";
-                sb.AppendLine(
-                    $"$ces += New-SqlColumnEncryptionSettings -ColumnName \"{fq}\" -EncryptionType {t.Type} -EncryptionKey \"{t.Cek}\"");
+                sb.AppendLine($"  @{{ Schema = '{t.Schema}'; Table = '{t.Table}'; Column = '{t.Column}'; Type = '{t.Type}'; Cek = '{t.Cek}' }}");
             }
 
-            sb.AppendLine(@"
-$setArgs = @{ InputObject = $db; ColumnEncryptionSettings = $ces }
-if ($PSBoundParameters.ContainsKey('LogFileDirectory') -and $LogFileDirectory) { $setArgs.LogFileDirectory = $LogFileDirectory }
-if ($UseOnlineApproach) { $setArgs.UseOnlineApproach = $true; $setArgs.MaxDowntimeInSeconds = $MaxDowntimeInSeconds }
+            sb.AppendLine(@")
 
-Set-SqlColumnEncryption @setArgs
-Write-Host ""Applied Always Encrypted for migration " + migrationId + @"""
-");
+# Call the shared AE function with all parameters
+$params = @{
+  ConnectionString = $ConnectionString
+  AkvKeyId = $AkvKeyId
+  MigrationId = '" + migrationId + @"'
+  AeTargets = $aeTargets
+  CmkName = $CmkName
+}
+
+if ($UseOnlineApproach) { $params.UseOnlineApproach = $true }
+if ($MaxDowntimeInSeconds -ne 180) { $params.MaxDowntimeInSeconds = $MaxDowntimeInSeconds }
+if ($LogFileDirectory) { $params.LogFileDirectory = $LogFileDirectory }
+
+Invoke-AlwaysEncryptedMigration @params");
 
             return sb.ToString();
         }

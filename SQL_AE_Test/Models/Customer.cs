@@ -9,8 +9,8 @@ namespace SQL_AE_Test.Models
         [AlwaysEncrypted(AeEncryptionType.Deterministic, cekName: "CEK_PII")]
         public required string SSN { get; set; }
 
-        [AlwaysEncrypted(AeEncryptionType.Randomized)]
-        public required DateTime BirthDate { get; set; }
+        [AlwaysEncrypted(AeEncryptionType.Randomized, cekName: "CEK_PII")]
+        public DateTime? BirthDate { get; set; }
 
         public string? Description { get; set; }
     }
