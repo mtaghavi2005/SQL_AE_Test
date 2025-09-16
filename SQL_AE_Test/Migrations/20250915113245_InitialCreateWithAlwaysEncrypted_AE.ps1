@@ -2,7 +2,7 @@ param(
   [Parameter(Mandatory=$true)] [string] $ConnectionString,
   [Parameter(Mandatory=$true)] [string] $AkvKeyId,
   [Parameter(Mandatory=$true)] [string] $ScriptRoot,
-  [string] $CmkName = 'CMK_App',
+  [Parameter(Mandatory=$true)] [string] $CmkName,
   [switch] $UseOnlineApproach,
   [int] $MaxDowntimeInSeconds = 180,
   [string] $LogFileDirectory = $null
@@ -32,3 +32,5 @@ if ($MaxDowntimeInSeconds -ne 180) { $params.MaxDowntimeInSeconds = $MaxDowntime
 if ($LogFileDirectory) { $params.LogFileDirectory = $LogFileDirectory }
 
 Invoke-AlwaysEncryptedMigration @params
+
+Remove-OrphanedAlwaysEncryptedObjects -ConnectionString $ConnectionString -CurrentAeTargets $aeTargets

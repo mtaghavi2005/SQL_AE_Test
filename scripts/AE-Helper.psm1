@@ -8,7 +8,7 @@ function Invoke-AlwaysEncryptedMigration {
         [Parameter(Mandatory=$true)] [string] $ConnectionString,
         [Parameter(Mandatory=$true)] [string] $AkvKeyId,
         [Parameter(Mandatory=$true)] [string] $MigrationId,
-        [Parameter(Mandatory=$true)] [array] $AeTargets,
+        [Parameter(Mandatory=$false)] [array] $AeTargets = @(),  # Allow empty arrays
         [string] $CmkName = 'CMK_App',
         [switch] $UseOnlineApproach,
         [int] $MaxDowntimeInSeconds = 180,
@@ -25,7 +25,7 @@ function Invoke-AlwaysEncryptedMigration {
     # Get Azure Key Vault access token for authentication
     $keyVaultAccessToken = $null
     try {
-        $keyVaultAccessToken = (Get-AzAccessToken -ResourceUrl https://vault.azure.net).Token
+        $keyVaultAccessToken = (Get-AzAccessToken -ResourceUrl "https://vault.azure.net").Token
         Write-Host "Azure Key Vault access token obtained successfully" -ForegroundColor Green
     } catch {
         Write-Warning "Failed to get Azure Key Vault access token. Ensure you're authenticated with Connect-AzAccount"
@@ -43,12 +43,8 @@ function Invoke-AlwaysEncryptedMigration {
         throw "Could not establish database connection with the provided connection string"
     }
 
-    # Debug output
-    if ($db) {
-        Write-Host "Database object type: $($db.GetType().FullName)"
-        Write-Host "Database name: $($db.Name)"
-    } else {
-        Write-Host "ERROR: Database connection failed - db object is null" -ForegroundColor Red
+    # Validate database connection
+    if (-not $db) {
         throw "Could not establish database connection"
     }
 
@@ -57,10 +53,7 @@ function Invoke-AlwaysEncryptedMigration {
     $vaultName = $keyUrlParts[2] -replace '\.vault\.azure\.net', ''
     $keyName = $keyUrlParts[4]
 
-    Write-Host "Key Vault Details:" -ForegroundColor Yellow
-    Write-Host "  Vault Name: $vaultName" -ForegroundColor Gray
-    Write-Host "  Key Name: $keyName" -ForegroundColor Gray
-    Write-Host "  Full Key URL: $AkvKeyId" -ForegroundColor Gray
+
 
     # Ensure the key exists in Azure Key Vault
     Write-Host ""
@@ -69,7 +62,6 @@ function Invoke-AlwaysEncryptedMigration {
         $existingKey = Get-AzKeyVaultKey -VaultName $vaultName -Name $keyName -ErrorAction SilentlyContinue
         if ($existingKey) {
             Write-Host "✅ Key '$keyName' already exists in Key Vault '$vaultName'" -ForegroundColor Green
-            Write-Host "   Key ID: $($existingKey.Id)" -ForegroundColor Gray
             # Update AkvKeyId to use the specific version
             $AkvKeyId = $existingKey.Id
         } else {
@@ -77,7 +69,6 @@ function Invoke-AlwaysEncryptedMigration {
             $newKey = Add-AzKeyVaultKey -VaultName $vaultName -Name $keyName -Destination Software -KeyType RSA -Size 2048
             if ($newKey) {
                 Write-Host "✅ Key '$keyName' created successfully!" -ForegroundColor Green
-                Write-Host "   Key ID: $($newKey.Id)" -ForegroundColor Gray
                 $AkvKeyId = $newKey.Id
             } else {
                 throw "Failed to create key in Key Vault"
@@ -152,10 +143,7 @@ function Invoke-AlwaysEncryptedMigration {
         $ces += New-SqlColumnEncryptionSettings -ColumnName $fqColumnName -EncryptionType $target.Type -EncryptionKey $target.Cek
     }
 
-    Write-Host "Column encryption settings:" -ForegroundColor Gray
-    foreach ($setting in $ces) {
-        Write-Host "  $($setting.ColumnName) -> $($setting.EncryptionType) ($($setting.EncryptionKey))" -ForegroundColor Gray
-    }
+
 
     $setArgs = @{ 
         InputObject = $db
@@ -167,16 +155,13 @@ function Invoke-AlwaysEncryptedMigration {
         # Create log directory if it doesn't exist
         if (-not (Test-Path $LogFileDirectory)) {
             New-Item -Path $LogFileDirectory -ItemType Directory -Force | Out-Null
-            Write-Host "Created log directory: $LogFileDirectory" -ForegroundColor Gray
         }
         $setArgs.LogFileDirectory = $LogFileDirectory 
-        Write-Host "Logging to: $LogFileDirectory" -ForegroundColor Gray
     }
 
     if ($UseOnlineApproach) { 
         $setArgs.UseOnlineApproach = $true
         $setArgs.MaxDowntimeInSeconds = $MaxDowntimeInSeconds
-        Write-Host "Using online approach (max downtime: $MaxDowntimeInSeconds seconds)" -ForegroundColor Gray
     }
 
     try {
@@ -192,5 +177,229 @@ function Invoke-AlwaysEncryptedMigration {
     Write-Host "🎉 Always Encrypted migration completed successfully!" -ForegroundColor Magenta
 }
 
-# Export the function
-Export-ModuleMember -Function Invoke-AlwaysEncryptedMigration
+function Remove-OrphanedAlwaysEncryptedObjects {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)] [string] $ConnectionString,
+        [Parameter(Mandatory=$false)] [array] $CurrentAeTargets = @(),  # Current AE targets from EF model (can be empty)
+        [switch] $WhatIf
+    )
+    
+    Write-Host "🧹 Cleaning up orphaned Always Encrypted objects..." -ForegroundColor Cyan
+    
+    # Connect to database
+    $db = Get-SqlDatabase -ConnectionString $ConnectionString
+    
+    # Get all currently encrypted columns from database
+    $encryptedColumnsQuery = @"
+SELECT 
+    s.name AS SchemaName,
+    t.name AS TableName,
+    c.name AS ColumnName,
+    cek.name AS ColumnEncryptionKeyName,
+    c.encryption_type_desc AS EncryptionType
+FROM sys.columns c
+INNER JOIN sys.tables t ON c.object_id = t.object_id
+INNER JOIN sys.schemas s ON t.schema_id = s.schema_id
+LEFT JOIN sys.column_encryption_keys cek ON c.column_encryption_key_id = cek.column_encryption_key_id
+WHERE c.encryption_type IS NOT NULL
+"@
+    
+    $currentlyEncryptedColumns = Invoke-Sqlcmd -ConnectionString $ConnectionString -Query $encryptedColumnsQuery
+    
+    # Convert current AE targets to lookup set
+    $desiredEncryptedColumns = @{}
+    foreach ($target in $CurrentAeTargets) {
+        $key = "$($target.Schema).$($target.Table).$($target.Column)"
+        $desiredEncryptedColumns[$key] = $target
+    }
+    
+    # Find columns that are encrypted in DB but not in current EF model
+    $columnsToDecrypt = @()
+    foreach ($col in $currentlyEncryptedColumns) {
+        $key = "$($col.SchemaName).$($col.TableName).$($col.ColumnName)"
+        if (-not $desiredEncryptedColumns.ContainsKey($key)) {
+            $columnsToDecrypt += $col
+        }
+    }
+    
+    Write-Host ""
+    Write-Host "📊 Cleanup Analysis:" -ForegroundColor Yellow
+    Write-Host "  Currently encrypted columns in DB: $($currentlyEncryptedColumns.Count)" -ForegroundColor Gray
+    Write-Host "  Desired encrypted columns from EF model: $($CurrentAeTargets.Count)" -ForegroundColor Gray
+    Write-Host "  Columns to decrypt (no longer in EF model): $($columnsToDecrypt.Count)" -ForegroundColor Red
+    
+    if ($columnsToDecrypt.Count -gt 0) {
+        Write-Host ""
+        Write-Host "🔓 Columns to decrypt:" -ForegroundColor Red
+        foreach ($col in $columnsToDecrypt) {
+            Write-Host "  - $($col.SchemaName).$($col.TableName).$($col.ColumnName) (CEK: $($col.ColumnEncryptionKeyName))" -ForegroundColor Red
+        }
+    }
+    
+    if ($WhatIf) {
+        Write-Host ""
+        Write-Host "⚠️  WhatIf mode - no changes will be made" -ForegroundColor Yellow
+        
+        if ($columnsToDecrypt.Count -eq 0) {
+            Write-Host "✅ No cleanup needed - all encrypted columns are in current EF model" -ForegroundColor Green
+        }
+        
+        return $columnsToDecrypt
+    }
+    
+    # Initialize results structure
+    $decryptedColumns = @()
+    $orphanedCeks = @()
+    $orphanedCmks = @()
+    
+    # Only decrypt columns if there are any to decrypt
+    if ($columnsToDecrypt.Count -gt 0) {
+    
+        # Get Key Vault access token for decryption
+        $keyVaultAccessToken = $null
+        try {
+            $keyVaultAccessToken = (Get-AzAccessToken -ResourceUrl "https://vault.azure.net").Token
+            Write-Host "✅ Azure Key Vault access token obtained" -ForegroundColor Green
+        } catch {
+            Write-Warning "Failed to get Azure Key Vault access token. Decryption may fail."
+        }
+        
+        # Decrypt orphaned columns
+        Write-Host ""
+        Write-Host "🔓 Removing encryption from orphaned columns..." -ForegroundColor Yellow
+        
+        $ces = @()
+        foreach ($col in $columnsToDecrypt) {
+            $fqColumnName = "$($col.SchemaName).$($col.TableName).$($col.ColumnName)"
+            $ces += New-SqlColumnEncryptionSettings -ColumnName $fqColumnName -EncryptionType PlainText
+            Write-Host "  Decrypting: $fqColumnName" -ForegroundColor Gray
+        }
+        
+        $setArgs = @{ 
+            InputObject = $db
+            ColumnEncryptionSettings = $ces
+        }
+        
+        if ($keyVaultAccessToken) {
+            $setArgs.KeyVaultAccessToken = $keyVaultAccessToken
+        }
+        
+        try {
+            Set-SqlColumnEncryption @setArgs
+            Write-Host "✅ Successfully decrypted $($columnsToDecrypt.Count) orphaned columns" -ForegroundColor Green
+            $decryptedColumns = $columnsToDecrypt
+        } catch {
+            Write-Host "❌ Column decryption failed: $($_.Exception.Message)" -ForegroundColor Red
+            throw $_
+        }
+    } else {
+        Write-Host ""
+        Write-Host "✅ No columns to decrypt - all encrypted columns match current EF model" -ForegroundColor Green
+    }
+    
+    # Now clean up orphaned CEKs and CMKs
+    Write-Host ""
+    Write-Host "🗑️ Cleaning up orphaned CEKs and CMKs..." -ForegroundColor Yellow
+    
+    # Get currently used CEKs (from remaining encrypted columns)
+    $usedCeksQuery = @"
+SELECT DISTINCT cek.name AS ColumnEncryptionKeyName
+FROM sys.columns c
+INNER JOIN sys.column_encryption_keys cek ON c.column_encryption_key_id = cek.column_encryption_key_id
+WHERE c.encryption_type IS NOT NULL
+"@
+    $usedCeks = Invoke-Sqlcmd -ConnectionString $ConnectionString -Query $usedCeksQuery
+    $usedCekNames = if ($usedCeks) { $usedCeks | ForEach-Object { $_.ColumnEncryptionKeyName } } else { @() }
+    
+    # Remove orphaned CEKs
+    $allCeks = Get-SqlColumnEncryptionKey -InputObject $db
+    $orphanedCeks = $allCeks | Where-Object { $_.Name -notin $usedCekNames }
+    
+    $successfullyRemovedCeks = @()
+    foreach ($cek in $orphanedCeks) {
+        try {
+            Write-Host "  Removing orphaned CEK: $($cek.Name)" -ForegroundColor Gray
+            Remove-SqlColumnEncryptionKey -InputObject $db -Name $cek.Name
+            Write-Host "  ✅ Removed CEK: $($cek.Name)" -ForegroundColor Green
+            $successfullyRemovedCeks += $cek
+        } catch {
+            Write-Host "  ❌ Failed to remove CEK $($cek.Name): $($_.Exception.Message)" -ForegroundColor Red
+        }
+    }
+    
+    # Update orphanedCeks to only include successfully removed ones
+    $orphanedCeks = $successfullyRemovedCeks
+    
+    # Remove orphaned CMKs 
+    # Strategy: If no columns are encrypted at all, remove ALL CMKs
+    # Otherwise, only remove CMKs not referenced by any remaining CEKs
+    $allCmks = Get-SqlColumnMasterKey -InputObject $db
+    
+    # Check if there are any encrypted columns remaining in the database
+    $remainingEncryptedColumns = Invoke-Sqlcmd -ConnectionString $ConnectionString -Query $encryptedColumnsQuery
+    
+    if ($remainingEncryptedColumns.Count -eq 0 -and $CurrentAeTargets.Count -eq 0) {
+        # No encrypted columns in DB and none desired from EF model - remove ALL CMKs
+        Write-Host "  No encrypted columns remaining - removing ALL CMKs for complete cleanup" -ForegroundColor Yellow
+        $orphanedCmks = $allCmks
+    } else {
+        # Standard cleanup - only remove CMKs not referenced by remaining CEKs
+        # But first, check if we actually removed any CEKs - if not, don't remove CMKs either
+        if ($successfullyRemovedCeks.Count -eq 0) {
+            # No CEKs were removed, so don't attempt CMK removal
+            Write-Host "  No CEKs removed - skipping CMK cleanup to preserve active keys" -ForegroundColor Gray
+            $orphanedCmks = @()
+        } else {
+            # Some CEKs were removed - check which CMKs are still needed
+            $remainingCeksAfterCleanup = Get-SqlColumnEncryptionKey -InputObject $db
+            $usedCmkNames = $remainingCeksAfterCleanup | ForEach-Object { 
+                # Get the CMK name through the Parent property or Name property
+                if ($_.Parent -and $_.Parent.Name) { 
+                    $_.Parent.Name 
+                } else { 
+                    # Fallback - query database for this specific CEK's CMK
+                    $cmkQuery = "SELECT cmk.name FROM sys.column_encryption_keys cek JOIN sys.column_master_keys cmk ON cek.column_master_key_id = cmk.column_master_key_id WHERE cek.name = '$($_.Name)'"
+                    $cmkResult = Invoke-Sqlcmd -ConnectionString $ConnectionString -Query $cmkQuery
+                    if ($cmkResult) { $cmkResult.name } else { $null }
+                }
+            } | Where-Object { $_ } | Sort-Object -Unique
+            $orphanedCmks = $allCmks | Where-Object { $_.Name -notin $usedCmkNames }
+        }
+    }
+    
+    $successfullyRemovedCmks = @()
+    foreach ($cmk in $orphanedCmks) {
+        try {
+            Write-Host "  Removing orphaned CMK: $($cmk.Name)" -ForegroundColor Gray
+            Remove-SqlColumnMasterKey -InputObject $db -Name $cmk.Name
+            Write-Host "  ✅ Removed CMK: $($cmk.Name)" -ForegroundColor Green
+            $successfullyRemovedCmks += $cmk
+        } catch {
+            Write-Host "  ❌ Failed to remove CMK $($cmk.Name): $($_.Exception.Message)" -ForegroundColor Red
+        }
+    }
+    
+    # Update orphanedCmks to only include successfully removed ones
+    $orphanedCmks = $successfullyRemovedCmks
+    
+    Write-Host ""
+    Write-Host "🎉 Always Encrypted cleanup completed!" -ForegroundColor Magenta
+    Write-Host "  Decrypted columns: $($decryptedColumns.Count)" -ForegroundColor Gray
+    Write-Host "  Removed CEKs: $($orphanedCeks.Count)" -ForegroundColor Gray
+    Write-Host "  Removed CMKs: $($orphanedCmks.Count)" -ForegroundColor Gray
+    
+    # Extract names as strings instead of objects
+    $decryptedColumnNames = if ($decryptedColumns) { $decryptedColumns | ForEach-Object { "$($_.SchemaName).$($_.TableName).$($_.ColumnName)" } } else { @() }
+    $removedCekNames = if ($orphanedCeks) { $orphanedCeks | ForEach-Object { $_.Name } } else { @() }
+    $removedCmkNames = if ($orphanedCmks) { $orphanedCmks | ForEach-Object { $_.Name } } else { @() }
+    
+    return @{
+        DecryptedColumns = $decryptedColumnNames
+        RemovedCEKs = $removedCekNames
+        RemovedCMKs = $removedCmkNames
+    }
+}
+
+# Export the functions
+Export-ModuleMember -Function Invoke-AlwaysEncryptedMigration, Remove-OrphanedAlwaysEncryptedObjects

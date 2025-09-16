@@ -35,7 +35,9 @@ The project includes a custom `AeMigrationsScaffolder` that automatically:
 
 1. **Detects AE Columns**: Scans for properties marked with `[AlwaysEncrypted]` attributes
 2. **Generates Sidecar Scripts**: Creates `.ps1` files alongside each migration
-3. **Modular Design**: Uses a shared `AE-Helper.psm1` module to avoid code duplication
+3. **Always Generates Scripts**: Creates cleanup-enabled scripts for every migration
+4. **Automatic Cleanup**: Removes orphaned encrypted columns and unused keys
+5. **Modular Design**: Uses a shared `AE-Helper.psm1` module to avoid code duplication
 
 ### AE Attribute System
 
@@ -70,8 +72,11 @@ $aeTargets = @(
   # ... more targets
 )
 
-# Call shared AE function
+# Apply encryption
 Invoke-AlwaysEncryptedMigration @params
+
+# Cleanup orphaned objects
+Remove-OrphanedAlwaysEncryptedObjects -ConnectionString $ConnectionString -CurrentAeTargets $aeTargets
 ```
 
 ## 🚀 Getting Started
@@ -152,11 +157,18 @@ pwsh scripts/run-ae-local-deployment.ps1
 
 ### Migration Workflow
 
-1. **Model Changes**: Add/modify properties with `[AlwaysEncrypted]` attributes
-2. **Generate Migration**: `dotnet ef migrations add MigrationName`
-3. **Review Files**: Check generated `.cs` migration and `_AE.ps1` sidecar
-4. **Apply Schema**: `dotnet ef database update`  
-5. **Configure AE**: Run the generated `_AE.ps1` script
+1. **Model Changes**: Add/modify/remove properties with `[AlwaysEncrypted]` attributes
+2. **Generate Migration**: `dotnet ef migrations add MigrationName` (creates both `.cs` and `_AE.ps1` files)
+3. **Apply Schema**: `dotnet ef database update`  
+4. **Configure AE**: `pwsh scripts/run-ae-local-deployment.ps1` (handles encryption + cleanup)
+
+### Automatic Cleanup Features
+
+The system automatically handles:
+- **Column Decryption**: Removes encryption when `[AlwaysEncrypted]` attributes are removed
+- **Key Cleanup**: Deletes unused Column Encryption Keys (CEKs) and Column Master Keys (CMKs)
+- **Complete Removal**: When all AE attributes are removed, the database becomes completely AE-free
+- **Dependency Management**: Preserves keys still in use by other encrypted columns
 
 ## 📚 Additional Resources
 

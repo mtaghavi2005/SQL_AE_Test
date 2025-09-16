@@ -137,7 +137,7 @@ namespace SQL_AE_Test.Data.Infrastructure
   [Parameter(Mandatory=$true)] [string] $ConnectionString,
   [Parameter(Mandatory=$true)] [string] $AkvKeyId,
   [Parameter(Mandatory=$true)] [string] $ScriptRoot,
-  [string] $CmkName = 'CMK_App',
+  [Parameter(Mandatory=$true)] [string] $CmkName,
   [switch] $UseOnlineApproach,
   [int] $MaxDowntimeInSeconds = 180,
   [string] $LogFileDirectory = $null
@@ -162,15 +162,21 @@ $params = @{
   ConnectionString = $ConnectionString
   AkvKeyId = $AkvKeyId
   MigrationId = '" + migrationId + @"'
-  AeTargets = $aeTargets
   CmkName = $CmkName
+}
+
+# Add AeTargets only if not empty to avoid parameter binding issues
+if ($aeTargets.Count -gt 0) {
+  $params.AeTargets = $aeTargets
 }
 
 if ($UseOnlineApproach) { $params.UseOnlineApproach = $true }
 if ($MaxDowntimeInSeconds -ne 180) { $params.MaxDowntimeInSeconds = $MaxDowntimeInSeconds }
 if ($LogFileDirectory) { $params.LogFileDirectory = $LogFileDirectory }
 
-Invoke-AlwaysEncryptedMigration @params");
+Invoke-AlwaysEncryptedMigration @params
+
+Remove-OrphanedAlwaysEncryptedObjects -ConnectionString $ConnectionString -CurrentAeTargets $aeTargets");
 
             return sb.ToString();
         }
@@ -289,14 +295,13 @@ Invoke-AlwaysEncryptedMigration @params");
                     .Select(g => g.Last())
                     .ToList();
                 
-                if (allTargets.Count == 0) return files;
-
+                // Always generate PowerShell sidecar (even with no targets) to ensure cleanup runs
                 // Find where the migration file was saved; write sidecar next to it
                 var migrationFile = files.MigrationFile;
                 var folder = Path.GetDirectoryName(migrationFile) ?? outputDir ?? projectDir ?? ".";
                 var sidecarPath = Path.Combine(folder, $"{migration.MigrationId}_AE.ps1");
 
-                Console.WriteLine($"[AeMigrationsScaffolder] Writing PowerShell sidecar to: {sidecarPath}");
+                Console.WriteLine($"[AeMigrationsScaffolder] Writing PowerShell sidecar to: {sidecarPath} (with {allTargets.Count} AE targets)");
                 File.WriteAllText(sidecarPath, GeneratePowerShell(migration.MigrationId, allTargets));
                 Console.WriteLine("[AeMigrationsScaffolder] PowerShell sidecar written successfully!");
                 
