@@ -44,89 +44,15 @@ namespace SQL_AE_Test.Data.Infrastructure
 
         // ---- Helpers -------------------------------------------------------------------------
 
-        private static List<AeTarget> CollectAeTargetsFromDiffs(
-            IReadOnlyList<MigrationOperation> ops,
-            IModel currentModel)
+        private static void WriteDebug(string message)
         {
-            var list = new List<AeTarget>();
-            Console.WriteLine($"[CollectAeTargetsFromDiffs] Processing {ops.Count} operations:");
-            
-            foreach (var op in ops)
+            // Only output debug messages when EF verbosity is enabled
+            // You can also check for environment variables like EF_VERBOSE or dotnet ef --verbose
+            if (Environment.GetEnvironmentVariable("EF_VERBOSE") == "1" || 
+                Environment.GetEnvironmentVariable("DOTNET_EF_VERBOSE") == "1")
             {
-                Console.WriteLine($"[CollectAeTargetsFromDiffs] Operation type: {op.GetType().Name}");
-                switch (op)
-                {
-                    case CreateTableOperation create:
-                    {
-                        Console.WriteLine($"[CollectAeTargetsFromDiffs] CreateTableOperation for table: {create.Name}, columns: {create.Columns.Count}");
-                        foreach (var col in create.Columns)
-                        {
-                            var found = TryResolveAeForColumn(create.Schema ?? "dbo", create.Name!, col.Name, currentModel);
-                            if (found != null) {
-                                Console.WriteLine($"[CollectAeTargetsFromDiffs] Found AE target for column: {col.Name}");
-                                list.Add(found.Value);
-                            }
-                        }
-                        break;
-                    }
-                    case AddColumnOperation add:
-                    {
-                        var found = TryResolveAeForColumn(add.Schema ?? "dbo", add.Table!, add.Name, currentModel);
-                        if (found != null) list.Add(found.Value);
-                        break;
-                    }
-                    case AlterColumnOperation alt:
-                    {
-                        var found = TryResolveAeForColumn(alt.Schema ?? "dbo", alt.Table!, alt.Name, currentModel);
-                        if (found != null) list.Add(found.Value);
-                        break;
-                    }
-                    // You can extend here for RenameColumnOperation if you want to emit hints/logs.
-                }
+                Console.WriteLine($"[AeMigrationsScaffolder] {message}");
             }
-
-
-            // De-dup if both Add+Alter touch same column within the same diff batch
-            return list
-                .GroupBy(t => (t.Schema, t.Table, t.Column), new AeTargetKeyComparer())
-                .Select(g => g.Last())
-                .ToList();
-        }
-
-        private static AeTarget? TryResolveAeForColumn(string schema, string table, string columnName, IModel model)
-        {
-            Console.WriteLine($"[TryResolveAeForColumn] Looking for AE annotations on {schema}.{table}.{columnName}");
-            
-            // Find entity types mapped to the table
-            foreach (var et in model.GetEntityTypes()
-                         .Where(e => (e.GetSchema() ?? "dbo").Equals(schema, StringComparison.OrdinalIgnoreCase)
-                                     && (e.GetTableName() ?? "").Equals(table, StringComparison.OrdinalIgnoreCase)))
-            {
-                var soi = StoreObjectIdentifier.Table(table, schema);
-                foreach (var p in et.GetProperties())
-                {
-                    var col = p.GetColumnName(soi);
-                    if (!string.Equals(col, columnName, StringComparison.OrdinalIgnoreCase))
-                        continue;
-
-                    var type = p.FindAnnotation(AeAnnotationNames.Type)?.Value?.ToString();
-                    var cek = p.FindAnnotation(AeAnnotationNames.CEK)?.Value?.ToString();
-                    Console.WriteLine($"[TryResolveAeForColumn] Column {columnName}: type='{type}', cek='{cek}'");
-                    
-                    if (!string.IsNullOrWhiteSpace(type) && !string.IsNullOrWhiteSpace(cek))
-                    {
-                        // Normalize type to the values expected by Set-SqlColumnEncryption (Deterministic|Randomized)
-                        var normType = string.Equals(type, "Deterministic", StringComparison.OrdinalIgnoreCase)
-                            ? "Deterministic"
-                            : "Randomized";
-
-                        Console.WriteLine($"[TryResolveAeForColumn] Found AE target: {schema}.{table}.{columnName} -> {normType}, {cek}");
-                        return new AeTarget(schema, table, columnName, normType, cek);
-                    }
-                }
-            }
-
-            return null;
         }
 
         private static string GeneratePowerShell(string migrationId, List<AeTarget> targets)
@@ -183,36 +109,6 @@ Remove-OrphanedAlwaysEncryptedObjects -ConnectionString $ConnectionString -Curre
 
         private readonly record struct AeTarget(string Schema, string Table, string Column, string Type, string Cek);
 
-        // public MigrationFiles Save(ScaffoldedMigration scaffoldedMigration, string projectDir)
-        // {
-        //     Console.WriteLine($"[AeMigrationsScaffolder] Save called for migration: {scaffoldedMigration.MigrationId}");
-        //     
-        //     // Let EF write the migration files first
-        //     var files = _inner.Save(projectDir, scaffoldedMigration, outputDir: null);
-        //
-        //     // Compute differences snapshot -> current model
-        //     var snapshotModel = _migrationsAssembly.ModelSnapshot?.Model;
-        //     var currentModel = _current.Context.Model;
-        //
-        //     var diffs = _differ.GetDifferences(
-        //         snapshotModel?.GetRelationalModel(),
-        //         currentModel.GetRelationalModel());
-        //
-        //     // Extract AE-annotated columns BY RESOLVING THEM FROM THE CURRENT MODEL
-        //     var targets = CollectAeTargetsFromDiffs(diffs, currentModel);
-        //     Console.WriteLine($"[AeMigrationsScaffolder] Found {targets.Count} AE targets");
-        //     
-        //     if (targets.Count == 0)
-        //         return files;
-        //
-        //     // Generate PS content and write next to migration .cs
-        //     var folder = Path.GetDirectoryName(files.MigrationFile) ?? ".";
-        //     var psPath = Path.Combine(folder, $"{scaffoldedMigration.MigrationId}_AE.ps1");
-        //     File.WriteAllText(psPath, GeneratePowerShell(scaffoldedMigration.MigrationId, targets));
-        //     Console.WriteLine($"[AeMigrationsScaffolder] PowerShell sidecar written to: {psPath}");
-        //
-        //     return files;
-        // }
 
         public ScaffoldedMigration ScaffoldMigration(
             string migrationName,
@@ -221,13 +117,12 @@ Remove-OrphanedAlwaysEncryptedObjects -ConnectionString $ConnectionString -Curre
             string? language = null,
             bool dryRun = false)
         {
-            Console.WriteLine($"[AeMigrationsScaffolder] Scaffolding migration: {migrationName}");
+            WriteDebug($"Scaffolding migration: {migrationName}");
             var scaffoldedMigration = _inner.ScaffoldMigration(migrationName, rootNamespace, subNamespace, language, dryRun);
             
             if (!dryRun)
             {
-                // Generate PowerShell sidecar file - this will be handled by the Save method when EF calls it
-                Console.WriteLine($"[AeMigrationsScaffolder] Migration scaffolded: {migrationName}");
+                WriteDebug($"Migration scaffolded: {migrationName}");
             }
             
             return scaffoldedMigration;
@@ -258,15 +153,15 @@ Remove-OrphanedAlwaysEncryptedObjects -ConnectionString $ConnectionString -Curre
             string? outputDir,
             bool dryRun = false)
         {
-            Console.WriteLine($"[AeMigrationsScaffolder] Save (overload 2) called for migration: {migration.MigrationId}, dryRun: {dryRun}");
+            WriteDebug($"Save called for migration: {migration.MigrationId}, dryRun: {dryRun}");
             
             // Delegate to the default scaffolder first
             var files = _inner.Save(projectDir, migration, outputDir, dryRun);
-            Console.WriteLine($"[AeMigrationsScaffolder] Default scaffolder completed");
+            WriteDebug("Default scaffolder completed");
 
             // Only emit sidecar when not a dry-run (and we have a concrete migration path)
             if (dryRun) {
-                Console.WriteLine("[AeMigrationsScaffolder] Dry run, skipping PowerShell generation");
+                WriteDebug("Dry run, skipping PowerShell generation");
                 return files;
             }
 
@@ -277,23 +172,11 @@ Remove-OrphanedAlwaysEncryptedObjects -ConnectionString $ConnectionString -Curre
                 var designTimeModel = _current.Context.GetService<IDesignTimeModel>();
                 var currentModel = designTimeModel.Model;
 
-                Console.WriteLine("[AeMigrationsScaffolder] Computing model differences...");
-                var diffs = _differ.GetDifferences(
-                    snapshotModel?.GetRelationalModel(),
-                    currentModel.GetRelationalModel());
-
-                Console.WriteLine($"[AeMigrationsScaffolder] Found {diffs.Count} differences, collecting AE targets from ops...");
-                var targetsFromOps = CollectAeTargetsFromDiffs(diffs, currentModel);
-                Console.WriteLine($"[AeMigrationsScaffolder] Found {targetsFromOps.Count} AE targets from ops diff");
-                
-                Console.WriteLine($"[AeMigrationsScaffolder] Found {diffs.Count} differences, collecting AE targets from model...");
-                var targetsFromModel = CollectAeTargetsFromModel(currentModel);
-                Console.WriteLine($"[AeMigrationsScaffolder] Found {targetsFromModel.Count} AE targets from model");
-                
-                var allTargets = targetsFromOps.Concat(targetsFromModel)
-                    .GroupBy(t => (t.Schema, t.Table, t.Column), new AeTargetKeyComparer())
-                    .Select(g => g.Last())
-                    .ToList();
+                // For AE configuration, we only care about the current model state (desired final state)
+                // Not the migration operations - the cleanup system handles the differences
+                WriteDebug("Collecting AE targets from current model...");
+                var allTargets = CollectAeTargetsFromModel(currentModel);
+                WriteDebug($"Found {allTargets.Count} AE targets from model");
                 
                 // Always generate PowerShell sidecar (even with no targets) to ensure cleanup runs
                 // Find where the migration file was saved; write sidecar next to it
@@ -301,16 +184,16 @@ Remove-OrphanedAlwaysEncryptedObjects -ConnectionString $ConnectionString -Curre
                 var folder = Path.GetDirectoryName(migrationFile) ?? outputDir ?? projectDir ?? ".";
                 var sidecarPath = Path.Combine(folder, $"{migration.MigrationId}_AE.ps1");
 
-                Console.WriteLine($"[AeMigrationsScaffolder] Writing PowerShell sidecar to: {sidecarPath} (with {allTargets.Count} AE targets)");
+                WriteDebug($"Writing PowerShell sidecar to: {sidecarPath} (with {allTargets.Count} AE targets)");
                 File.WriteAllText(sidecarPath, GeneratePowerShell(migration.MigrationId, allTargets));
-                Console.WriteLine("[AeMigrationsScaffolder] PowerShell sidecar written successfully!");
+                WriteDebug("PowerShell sidecar written successfully!");
                 
                 return files;
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[AeMigrationsScaffolder] ERROR generating PowerShell sidecar: {ex.Message}");
-                Console.WriteLine($"[AeMigrationsScaffolder] Stack trace: {ex.StackTrace}");
+                WriteDebug($"ERROR generating PowerShell sidecar: {ex.Message}");
+                WriteDebug($"Stack trace: {ex.StackTrace}");
                 return files;
             }
         }
@@ -322,45 +205,45 @@ Remove-OrphanedAlwaysEncryptedObjects -ConnectionString $ConnectionString -Curre
         private static List<AeTarget> CollectAeTargetsFromModel(IModel model)
         {
             var result = new List<AeTarget>();
-            Console.WriteLine($"[AeMigrationsScaffolder] CollectAeTargetsFromModel: Processing {model.GetEntityTypes().Count()} entity types");
+            WriteDebug($"CollectAeTargetsFromModel: Processing {model.GetEntityTypes().Count()} entity types");
 
             foreach (var et in model.GetEntityTypes())
             {
-                Console.WriteLine($"[AeMigrationsScaffolder] Processing entity: {et.Name}");
+                WriteDebug($"Processing entity: {et.Name}");
                 var schema = et.GetSchema() ?? "dbo";
                 var table  = et.GetTableName();
-                Console.WriteLine($"[AeMigrationsScaffolder] Entity {et.Name}: schema='{schema}', table='{table}'");
+                WriteDebug($"Entity {et.Name}: schema='{schema}', table='{table}'");
                 if (string.IsNullOrEmpty(table)) continue;
 
                 var soi = StoreObjectIdentifier.Table(table, schema);
 
                 foreach (var p in et.GetProperties())
                 {
-                    Console.WriteLine($"[AeMigrationsScaffolder] Processing property: {p.Name}");
+                    WriteDebug($"Processing property: {p.Name}");
                     
                     // Check if this property has AE annotations
                     var hasAeType = p.GetAnnotations().Any(a => a.Name == "AE:Type");
                     var hasAeCek = p.GetAnnotations().Any(a => a.Name == "AE:CekName");
-                    Console.WriteLine($"[AeMigrationsScaffolder] Property {p.Name}: hasAeType={hasAeType}, hasAeCek={hasAeCek}");
+                    WriteDebug($"Property {p.Name}: hasAeType={hasAeType}, hasAeCek={hasAeCek}");
                     
                     if (!hasAeType || !hasAeCek) continue;
                     
                     var colName = p.GetColumnName(soi);
-                    Console.WriteLine($"[AeMigrationsScaffolder] Property {p.Name}: colName='{colName}'");
+                    WriteDebug($"Property {p.Name}: colName='{colName}'");
                     
                     // Fallback to property name if GetColumnName returns empty
                     if (string.IsNullOrEmpty(colName)) 
                     {
                         colName = p.Name;
-                        Console.WriteLine($"[AeMigrationsScaffolder] Property {p.Name}: Using property name as column name: '{colName}'");
+                        WriteDebug($"Property {p.Name}: Using property name as column name: '{colName}'");
                     }
 
                     var type = p.FindAnnotation("AE:Type")?.Value?.ToString();
                     var cek  = p.FindAnnotation("AE:CekName")?.Value?.ToString();
-                    Console.WriteLine($"[AeMigrationsScaffolder] Property {p.Name}: Found AE - type={type}, cek={cek}");
+                    WriteDebug($"Property {p.Name}: Found AE - type={type}, cek={cek}");
                     if (string.IsNullOrWhiteSpace(type) || string.IsNullOrWhiteSpace(cek)) 
                     {
-                        Console.WriteLine($"[AeMigrationsScaffolder] Property {p.Name}: Skipping - empty type or cek");
+                        WriteDebug($"Property {p.Name}: Skipping - empty type or cek");
                         continue;
                     }
 
@@ -368,12 +251,12 @@ Remove-OrphanedAlwaysEncryptedObjects -ConnectionString $ConnectionString -Curre
                         ? "Deterministic"
                         : "Randomized";
 
-                    Console.WriteLine($"[AeMigrationsScaffolder] Property {p.Name}: Adding AE target - schema={schema}, table={table}, column={colName}, type={normType}, cek={cek}");
+                    WriteDebug($"Property {p.Name}: Adding AE target - schema={schema}, table={table}, column={colName}, type={normType}, cek={cek}");
                     result.Add(new AeTarget(schema, table, colName, normType, cek!));
                 }
             }
 
-            Console.WriteLine($"[AeMigrationsScaffolder] CollectAeTargetsFromModel: Returning {result.Count} targets");
+            WriteDebug($"CollectAeTargetsFromModel: Returning {result.Count} targets");
             return result;
         }
 
