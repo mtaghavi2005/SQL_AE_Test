@@ -7,7 +7,7 @@ function Invoke-AlwaysEncryptedMigration {
     param(
         [Parameter(Mandatory=$true)] [string] $ConnectionString,
         [Parameter(Mandatory=$true)] [string] $AkvKeyId,
-        [Parameter(Mandatory=$true)] [string] $MigrationId,
+        [Parameter(Mandatory=$false)] [string] $MigrationId = 'CurrentModelDeployment',
         [Parameter(Mandatory=$false)] [array] $AeTargets = @(),  # Allow empty arrays
         [string] $CmkName = 'CMK_App',
         [switch] $UseOnlineApproach,
@@ -95,7 +95,7 @@ function Invoke-AlwaysEncryptedMigration {
     # Ensure Column Master Key (AKV-backed)
     Write-Host ""
     Write-Host "🔐 Managing Column Master Key in SQL Database..." -ForegroundColor Green
-    $cmkSettings = New-SqlAzureKeyVaultColumnMasterKeySettings -KeyUrl $AkvKeyId
+    $cmkSettings = New-SqlAzureKeyVaultColumnMasterKeySettings -KeyUrl $AkvKeyId -AllowEnclaveComputations -KeyVaultAccessToken $keyVaultAccessToken
     if (-not (Get-SqlColumnMasterKey -InputObject $db | Where-Object Name -eq $CmkName)) {
         Write-Host "Creating Column Master Key: $CmkName with AKV key: $AkvKeyId"
         New-SqlColumnMasterKey -InputObject $db -Name $CmkName -ColumnMasterKeySettings $cmkSettings | Out-Null
@@ -104,12 +104,55 @@ function Invoke-AlwaysEncryptedMigration {
         Write-Host "✅ Column Master Key '$CmkName' already exists" -ForegroundColor Green
     }
 
+    try {
+        $cmkStatus = Invoke-Sqlcmd -ConnectionString $ConnectionString -Query "SELECT enclave_computations_enabled FROM sys.column_master_keys WHERE name = '$CmkName'"
+        if ($cmkStatus -and $cmkStatus[0].enclave_computations_enabled -eq 1) {
+            Write-Host "🛡️  Enclave computations are enabled for CMK '$CmkName'" -ForegroundColor Green
+        } else {
+            throw "CMK '$CmkName' is not configured for enclave computations. Please provision or update the CMK to allow enclave computations before rerunning."
+        }
+    } catch {
+        throw "Unable to verify enclave configuration for CMK '$CmkName': $($_.Exception.Message)"
+    }
+
     # Create Column Encryption Keys
     Write-Host ""
     Write-Host "🔐 Managing Column Encryption Keys..." -ForegroundColor Green
 
+    # Normalize AE targets to a consistent shape
+    $normalizedTargets = @()
+    foreach ($target in $AeTargets) {
+        if (-not $target) { continue }
+        $encryptionType = $null
+        if ($target.PSObject.Properties['EncryptionType']) {
+            $encryptionType = $target.EncryptionType
+        } elseif ($target.PSObject.Properties['Type']) {
+            $encryptionType = $target.Type
+        }
+        if ([string]::IsNullOrWhiteSpace($encryptionType)) {
+            $encryptionType = 'Plain'
+        }
+        $cekName = $null
+        if ($target.PSObject.Properties['CekName']) {
+            $cekName = $target.CekName
+        } elseif ($target.PSObject.Properties['Cek']) {
+            $cekName = $target.Cek
+        }
+        if ([string]::IsNullOrWhiteSpace($cekName)) {
+            $cekName = $null
+        }
+        $normalizedTargets += [pscustomobject]@{
+            Schema = $target.Schema
+            Table = $target.Table
+            Column = $target.Column
+            EncryptionType = $encryptionType
+            CekName = $cekName
+        }
+    }
+    $AeTargets = $normalizedTargets
+
     # Extract distinct CEKs from targets and ensure they exist
-    $distinctCeks = $AeTargets | ForEach-Object { $_.Cek } | Where-Object { $_ -and $_.Trim() } | Sort-Object -Unique
+    $distinctCeks = $AeTargets | Where-Object { $_.EncryptionType -ne 'Plain' -and $_.EncryptionType -ne 'PlainText' } | ForEach-Object { $_.CekName } | Where-Object { $_ -and $_.Trim() } | Sort-Object -Unique
     foreach ($cekName in $distinctCeks) {
         if (-not (Get-SqlColumnEncryptionKey -InputObject $db | Where-Object Name -eq $cekName)) {
             Write-Host "Creating Column Encryption Key: $cekName..." -ForegroundColor Yellow
@@ -140,7 +183,24 @@ function Invoke-AlwaysEncryptedMigration {
     $ces = @()
     foreach ($target in $AeTargets) {
         $fqColumnName = "$($target.Schema).$($target.Table).$($target.Column)"
-        $ces += New-SqlColumnEncryptionSettings -ColumnName $fqColumnName -EncryptionType $target.Type -EncryptionKey $target.Cek
+        $targetEncryptionType = $target.EncryptionType
+        if ($targetEncryptionType -eq 'Plain') {
+            $targetEncryptionType = 'PlainText'
+        }
+
+        $settingsArgs = @{
+            ColumnName = $fqColumnName
+            EncryptionType = $targetEncryptionType
+        }
+
+        if ($targetEncryptionType -ne 'PlainText') {
+            if (-not $target.CekName) {
+                throw "Column $fqColumnName requires a CEK name for encryption type $targetEncryptionType"
+            }
+            $settingsArgs.EncryptionKey = $target.CekName
+        }
+
+        $ces += New-SqlColumnEncryptionSettings @settingsArgs
     }
 
 
