@@ -121,6 +121,12 @@ The helper module provisions CMKs with `AllowEnclaveComputations`, creates CEKs 
    - Local testing: `pwsh scripts/run-ae-local-deployment.ps1`
    - CI/CD: invoke `scripts/run-ae-model-deployment.ps1` with the required parameters.
 
+### Per-Migration PowerShell Sidecars
+
+- `AeMigrationsScaffolder` still generates `*_AE.ps1` sidecars next to every EF migration.
+- Each sidecar now leverages the same model-driven discovery logic as the deployment script, ensuring history files always reflect the latest desired encryption state.
+- During development you can rerun a specific sidecar to restore encryption for that migration or compare the generated targets between commits.
+
 The deployment script is safe to rerun. It encrypts columns that require protection, decrypts columns that became plain, and (when `-Cleanup` is specified) removes unused CEKs and CMKs.
 
 ## 🛠️ PowerShell Usage

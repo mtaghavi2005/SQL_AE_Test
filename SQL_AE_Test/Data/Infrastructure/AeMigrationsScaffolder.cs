@@ -10,12 +10,15 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
+using System.Linq;
 using System.Text;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Design;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Migrations.Design;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace SQL_AE_Test.Data.Infrastructure
 {
@@ -168,7 +171,7 @@ Remove-OrphanedAlwaysEncryptedObjects -ConnectionString $ConnectionString -Curre
                 // Get models (prefer design-time model to avoid read-optimized issues)
                 var snapshotModel = _migrationsAssembly.ModelSnapshot?.Model;
                 var designTimeModel = _current.Context.GetService<IDesignTimeModel>();
-                var currentModel = designTimeModel.Model;
+                var currentModel = designTimeModel?.Model ?? snapshotModel ?? _current.Context.Model;
 
                 // For AE configuration, we only care about the current model state (desired final state)
                 // Not the migration operations - the cleanup system handles the differences
