@@ -8,17 +8,11 @@
 //         migrationsAssembly: sp.GetRequiredService<IMigrationsAssembly>(),
 //         current: sp.GetRequiredService<ICurrentDbContext>()));
 
-using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Linq;
 using System.Text;
-using Microsoft.EntityFrameworkCore;
-using Microsoft.EntityFrameworkCore.Design;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Metadata;
 using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Migrations.Design;
-using Microsoft.Extensions.DependencyInjection;
 
 namespace SQL_AE_Test.Data.Infrastructure
 {
@@ -29,7 +23,6 @@ namespace SQL_AE_Test.Data.Infrastructure
     public sealed class AeMigrationsScaffolder : IMigrationsScaffolder
     {
         private readonly IMigrationsScaffolder _inner;
-        private readonly IMigrationsModelDiffer _differ;
         private readonly IMigrationsAssembly _migrationsAssembly;
         private readonly ICurrentDbContext _current;
 
@@ -40,7 +33,6 @@ namespace SQL_AE_Test.Data.Infrastructure
             ICurrentDbContext current)
         {
             _inner = inner ?? throw new ArgumentNullException(nameof(inner));
-            _differ = differ ?? throw new ArgumentNullException(nameof(differ));
             _migrationsAssembly = migrationsAssembly ?? throw new ArgumentNullException(nameof(migrationsAssembly));
             _current = current ?? throw new ArgumentNullException(nameof(current));
         }
@@ -69,7 +61,8 @@ namespace SQL_AE_Test.Data.Infrastructure
   [Parameter(Mandatory=$true)] [string] $CmkName,
   [switch] $UseOnlineApproach,
   [int] $MaxDowntimeInSeconds = 180,
-  [string] $LogFileDirectory = $null
+  [string] $LogFileDirectory = $null,
+  [switch] $Cleanup
 )
 
 # Import the shared AE helper module from scripts folder
@@ -106,7 +99,11 @@ if ($LogFileDirectory) { $params.LogFileDirectory = $LogFileDirectory }
 
 Invoke-AlwaysEncryptedMigration @params
 
-Remove-OrphanedAlwaysEncryptedObjects -ConnectionString $ConnectionString -CurrentAeTargets $aeTargets");
+if ($Cleanup) {
+  Write-Host ""
+  Write-Host ""🧹 Running cleanup for orphaned Always Encrypted objects..."" -ForegroundColor Cyan
+  Remove-OrphanedAlwaysEncryptedObjects -ConnectionString $ConnectionString -CurrentAeTargets $aeTargets
+}");
 
             return sb.ToString();
         }
@@ -169,9 +166,8 @@ Remove-OrphanedAlwaysEncryptedObjects -ConnectionString $ConnectionString -Curre
             try 
             {
                 // Get models (prefer design-time model to avoid read-optimized issues)
-                var snapshotModel = _migrationsAssembly.ModelSnapshot?.Model;
                 var designTimeModel = _current.Context.GetService<IDesignTimeModel>();
-                var currentModel = designTimeModel?.Model ?? snapshotModel ?? _current.Context.Model;
+                var currentModel = designTimeModel?.Model ?? _current.Context.Model;
 
                 // For AE configuration, we only care about the current model state (desired final state)
                 // Not the migration operations - the cleanup system handles the differences
@@ -179,7 +175,7 @@ Remove-OrphanedAlwaysEncryptedObjects -ConnectionString $ConnectionString -Curre
                 var columnTargets = AeColumnTargetDiscovery.FromModel(currentModel);
                 WriteDebug($"Found {columnTargets.Count} AE targets from model");
                 
-                // Always generate PowerShell sidecar (even with no targets) to ensure cleanup runs
+                // Always generate PowerShell sidecar (even with no targets or AE column changes) to ensure cleanup runs
                 // Find where the migration file was saved; write sidecar next to it
                 var migrationFile = files.MigrationFile;
                 var folder = Path.GetDirectoryName(migrationFile) ?? outputDir ?? projectDir ?? ".";

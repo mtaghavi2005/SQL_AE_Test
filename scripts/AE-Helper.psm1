@@ -105,8 +105,11 @@ function Invoke-AlwaysEncryptedMigration {
     }
 
     try {
-        $cmkStatus = Invoke-Sqlcmd -ConnectionString $ConnectionString -Query "SELECT enclave_computations_enabled FROM sys.column_master_keys WHERE name = '$CmkName'"
-        if ($cmkStatus -and $cmkStatus[0].enclave_computations_enabled -eq 1) {
+        $cmkStatus = Invoke-Sqlcmd -ConnectionString $ConnectionString -Query "SELECT allow_enclave_computations FROM sys.column_master_keys WHERE name = '$CmkName'"
+
+        Write-Host "   Enclave computations allowed: $($cmkStatus['allow_enclave_computations'])" -ForegroundColor Gray
+
+        if ($cmkStatus -and $cmkStatus['allow_enclave_computations'] -eq 1) {
             Write-Host "🛡️  Enclave computations are enabled for CMK '$CmkName'" -ForegroundColor Green
         } else {
             throw "CMK '$CmkName' is not configured for enclave computations. Please provision or update the CMK to allow enclave computations before rerunning."
@@ -242,13 +245,22 @@ function Remove-OrphanedAlwaysEncryptedObjects {
     param(
         [Parameter(Mandatory=$true)] [string] $ConnectionString,
         [Parameter(Mandatory=$false)] [array] $CurrentAeTargets = @(),  # Current AE targets from EF model (can be empty)
+        [Parameter(Mandatory=$false)] [string] $SchemaName = $null,  # Optional schema filter - only cleanup specified schema
         [switch] $WhatIf
     )
     
     Write-Host "🧹 Cleaning up orphaned Always Encrypted objects..." -ForegroundColor Cyan
+    if ($SchemaName) {
+        Write-Host "   Scope: Schema '$SchemaName' only" -ForegroundColor Gray
+    } else {
+        Write-Host "   Scope: All schemas" -ForegroundColor Gray
+    }
     
     # Connect to database
     $db = Get-SqlDatabase -ConnectionString $ConnectionString
+    
+    # Build query with optional schema filter
+    $whereClause = if ($SchemaName) { "AND s.name = '$SchemaName'" } else { "" }
     
     # Get all currently encrypted columns from database
     $encryptedColumnsQuery = @"
@@ -262,7 +274,7 @@ FROM sys.columns c
 INNER JOIN sys.tables t ON c.object_id = t.object_id
 INNER JOIN sys.schemas s ON t.schema_id = s.schema_id
 LEFT JOIN sys.column_encryption_keys cek ON c.column_encryption_key_id = cek.column_encryption_key_id
-WHERE c.encryption_type IS NOT NULL
+WHERE c.encryption_type IS NOT NULL $whereClause
 "@
     
     $currentlyEncryptedColumns = Invoke-Sqlcmd -ConnectionString $ConnectionString -Query $encryptedColumnsQuery
@@ -285,6 +297,9 @@ WHERE c.encryption_type IS NOT NULL
     
     Write-Host ""
     Write-Host "📊 Cleanup Analysis:" -ForegroundColor Yellow
+    if ($SchemaName) {
+        Write-Host "  Scope: Schema '$SchemaName' only" -ForegroundColor Gray
+    }
     Write-Host "  Currently encrypted columns in DB: $($currentlyEncryptedColumns.Count)" -ForegroundColor Gray
     Write-Host "  Desired encrypted columns from EF model: $($CurrentAeTargets.Count)" -ForegroundColor Gray
     Write-Host "  Columns to decrypt (no longer in EF model): $($columnsToDecrypt.Count)" -ForegroundColor Red

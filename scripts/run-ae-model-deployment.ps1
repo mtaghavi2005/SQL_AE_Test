@@ -3,6 +3,8 @@ param(
     [Parameter(Mandatory=$true)] [string] $ConnectionString,
     [Parameter(Mandatory=$true)] [string] $AkvKeyId,
     [Parameter(Mandatory=$true)] [string] $CmkName,
+    [Parameter(Mandatory=$true)] [string] $ProjectPath,
+    [Parameter(Mandatory=$true)] [string] $DbSchema,
     [string] $LogFileDirectory = "./logs",
     [switch] $UseOnlineApproach,
     [int] $MaxDowntimeInSeconds = 180,
@@ -15,7 +17,13 @@ Write-Host "🚀 Always Encrypted Model Deployment" -ForegroundColor Cyan
 Write-Host "====================================" -ForegroundColor Cyan
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
-$projectPath = Join-Path $repoRoot "SQL_AE_Test/SQL_AE_Test.csproj"
+
+# If relative path, resolve it relative to repo root
+if (-not [System.IO.Path]::IsPathRooted($ProjectPath)) {
+    $projectPath = Join-Path $repoRoot $ProjectPath
+} else {
+    $projectPath = $ProjectPath
+}
 
 if (-not (Test-Path $projectPath)) {
     throw "Unable to locate project file at $projectPath"
@@ -79,7 +87,7 @@ Invoke-AlwaysEncryptedMigration @invokeArgs
 if ($Cleanup) {
     Write-Host ""
     Write-Host "🧹 Running cleanup for orphaned Always Encrypted objects..." -ForegroundColor Cyan
-    $cleanupResult = Remove-OrphanedAlwaysEncryptedObjects -ConnectionString $ConnectionString -CurrentAeTargets $aeTargets
+    $cleanupResult = Remove-OrphanedAlwaysEncryptedObjects -ConnectionString $ConnectionString -CurrentAeTargets $aeTargets -SchemaName $DbSchema
     if ($cleanupResult) {
         Write-Host "Cleanup summary:" -ForegroundColor Gray
         Write-Host "  Decrypted columns: $($cleanupResult.DecryptedColumns -join ', ')" -ForegroundColor Gray

@@ -59,7 +59,7 @@ Sample output:
     "Schema": "dbo",
     "Table": "Customers",
     "Column": "BirthDate",
-    "EncryptionType": "Plain",
+    "EncryptionType": "PlainText",
     "CekName": null
   }
 ]
@@ -134,6 +134,7 @@ The deployment script is safe to rerun. It encrypts columns that require protect
 ```powershell
 # Direct invocation
 pwsh scripts/run-ae-model-deployment.ps1 \
+    -ProjectPath ./SQL_AE_Test/SQL_AE_Test.csproj \ 
     -ConnectionString $env:SQL_CONNECTION_STRING \
     -AkvKeyId $env:AKV_KEY_ID \
     -CmkName $env:AE_CMK_NAME \

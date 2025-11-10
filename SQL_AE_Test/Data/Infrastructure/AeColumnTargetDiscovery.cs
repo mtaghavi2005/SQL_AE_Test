@@ -1,6 +1,3 @@
-using System;
-using System.Collections.Generic;
-using System.Linq;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata;
 
@@ -10,35 +7,29 @@ namespace SQL_AE_Test.Data.Infrastructure
     {
         public static IReadOnlyList<AeColumnTarget> FromModel(IModel model)
         {
-            if (model is null)
-            {
-                throw new ArgumentNullException(nameof(model));
-            }
+            ArgumentNullException.ThrowIfNull(model);
 
             var relationalModel = model.GetRelationalModel();
-            var results = new List<AeColumnTarget>();
 
-            foreach (var table in relationalModel.Tables)
-            {
-                var schema = table.Schema ?? "dbo";
-                var tableName = table.Name;
-
-                foreach (var column in table.Columns)
+            return relationalModel.Tables
+                .SelectMany(table =>
                 {
-                    var (encryptionType, cekName) = ResolveEncryptionMetadata(column);
+                    var schema = table.Schema ?? "dbo";
+                    var tableName = table.Name;
 
-                    results.Add(new AeColumnTarget
+                    return table.Columns.Select(column =>
                     {
-                        Schema = schema,
-                        Table = tableName,
-                        Column = column.Name,
-                        EncryptionType = encryptionType,
-                        CekName = cekName
+                        var (encryptionType, cekName) = ResolveEncryptionMetadata(column);
+                        return new AeColumnTarget
+                        {
+                            Schema = schema,
+                            Table = tableName,
+                            Column = column.Name,
+                            EncryptionType = encryptionType,
+                            CekName = cekName
+                        };
                     });
-                }
-            }
-
-            return results
+                })
                 .OrderBy(r => r.Schema, StringComparer.OrdinalIgnoreCase)
                 .ThenBy(r => r.Table, StringComparer.OrdinalIgnoreCase)
                 .ThenBy(r => r.Column, StringComparer.OrdinalIgnoreCase)
@@ -47,19 +38,24 @@ namespace SQL_AE_Test.Data.Infrastructure
 
         private static (string EncryptionType, string? CekName) ResolveEncryptionMetadata(IColumn column)
         {
-            foreach (var propertyMapping in column.PropertyMappings)
-            {
-                var property = propertyMapping.Property;
-                var typeAnnotation = property.FindAnnotation(AeAnnotationNames.Type);
-                if (typeAnnotation?.Value is string annotationValue && !string.IsNullOrWhiteSpace(annotationValue))
+            var propertyWithAe = column.PropertyMappings
+                .Select(pm => pm.Property)
+                .Select(p => new
                 {
-                    var cekAnnotation = property.FindAnnotation(AeAnnotationNames.CEK);
-                    var cekName = cekAnnotation?.Value as string;
-                    return (annotationValue, string.IsNullOrWhiteSpace(cekName) ? null : cekName);
-                }
+                    Property = p,
+                    TypeAnnotation = p.FindAnnotation(AeAnnotationNames.Type)?.Value as string
+                })
+                .FirstOrDefault(x => !string.IsNullOrWhiteSpace(x.TypeAnnotation));
+
+            if (propertyWithAe == null)
+            {
+                return (nameof(AeEncryptionType.PlainText), null);
             }
 
-            return ("Plain", null);
+            var cekAnnotation = propertyWithAe.Property.FindAnnotation(AeAnnotationNames.CEK);
+            var cekName = cekAnnotation?.Value as string;
+            
+            return (propertyWithAe.TypeAnnotation, string.IsNullOrWhiteSpace(cekName) ? null : cekName)!;
         }
     }
 }
