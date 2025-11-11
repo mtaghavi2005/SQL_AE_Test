@@ -17,18 +17,10 @@ namespace SQL_AE_Test.Data.Infrastructure
                     var schema = table.Schema ?? "dbo";
                     var tableName = table.Name;
 
-                    return table.Columns.Select(column =>
-                    {
-                        var (encryptionType, cekName) = ResolveEncryptionMetadata(column);
-                        return new AeColumnTarget
-                        {
-                            Schema = schema,
-                            Table = tableName,
-                            Column = column.Name,
-                            EncryptionType = encryptionType,
-                            CekName = cekName
-                        };
-                    });
+                    return table.Columns
+                        .Select(column => ResolveEncryptionMetadata(column, schema, tableName))
+                        .Where(target => target != null)
+                        .OfType<AeColumnTarget>();
                 })
                 .OrderBy(r => r.Schema, StringComparer.OrdinalIgnoreCase)
                 .ThenBy(r => r.Table, StringComparer.OrdinalIgnoreCase)
@@ -36,26 +28,29 @@ namespace SQL_AE_Test.Data.Infrastructure
                 .ToArray();
         }
 
-        private static (string EncryptionType, string? CekName) ResolveEncryptionMetadata(IColumn column)
+        private static AeColumnTarget? ResolveEncryptionMetadata(IColumn column, string schema, string tableName)
         {
             var propertyWithAe = column.PropertyMappings
                 .Select(pm => pm.Property)
-                .Select(p => new
-                {
-                    Property = p,
-                    TypeAnnotation = p.FindAnnotation(AeAnnotationNames.Type)?.Value as string
-                })
-                .FirstOrDefault(x => !string.IsNullOrWhiteSpace(x.TypeAnnotation));
+                .FirstOrDefault(p => p.FindAnnotation(AeAnnotationNames.Type) != null);
 
             if (propertyWithAe == null)
             {
-                return (nameof(AeEncryptionType.PlainText), null);
+                return null;
             }
 
-            var cekAnnotation = propertyWithAe.Property.FindAnnotation(AeAnnotationNames.CEK);
+            var typeAnnotation = propertyWithAe.FindAnnotation(AeAnnotationNames.Type)?.Value as string;
+            var cekAnnotation = propertyWithAe.FindAnnotation(AeAnnotationNames.CEK);
             var cekName = cekAnnotation?.Value as string;
-            
-            return (propertyWithAe.TypeAnnotation, string.IsNullOrWhiteSpace(cekName) ? null : cekName)!;
+
+            return new AeColumnTarget
+            {
+                Schema = schema,
+                Table = tableName,
+                Column = column.Name,
+                EncryptionType = typeAnnotation ?? string.Empty,
+                CekName = string.IsNullOrWhiteSpace(cekName) ? null : cekName
+            };
         }
     }
 }

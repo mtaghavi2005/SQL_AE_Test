@@ -42,6 +42,8 @@ The console application exposes a CLI mode that emits the Always Encrypted targe
 
 ```bash
 dotnet run --project SQL_AE_Test/SQL_AE_Test.csproj -- ae-dump-targets
+# Or save to file
+dotnet run --project SQL_AE_Test/SQL_AE_Test.csproj -- ae-dump-targets --output targets.json
 ```
 
 Sample output:
@@ -71,13 +73,13 @@ This JSON feeds the deployment pipeline and guarantees that encryption, decrypti
 
 `scripts/run-ae-model-deployment.ps1` performs idempotent Always Encrypted deployment:
 
-1. Calls `ae-dump-targets` to gather the desired state.
+1. Loads AE targets from a JSON file.
 2. Imports `AE-Helper.psm1`.
 3. Ensures enclave-enabled Column Master Key (CMK) and Column Encryption Keys (CEKs) exist in Azure SQL (backed by Azure Key Vault).
-4. Applies encryption or decryption for each mapped column based on the model output.
-5. (Optional) Runs cleanup to remove orphaned encrypted columns or unused keys.
+4. Applies encryption or decryption for each mapped column based on the JSON targets.
+5. (Optional) Runs cleanup to remove orphaned CEKs and CMKs for the specified schema.
 
-The helper module provisions CMKs with `AllowEnclaveComputations`, creates CEKs using Azure Key Vault tokens, and verifies `sys.column_master_keys.enclave_computations_enabled = 1` after provisioning.
+The helper module provisions CMKs with `AllowEnclaveComputations`, creates CEKs using Azure Key Vault tokens. Azure Key Vault key names use hyphens instead of underscores (e.g., `CMK_App` → `CMK-App`).
 
 ## 🚀 Getting Started
 
@@ -104,13 +106,13 @@ The helper module provisions CMKs with `AllowEnclaveComputations`, creates CEKs 
    Populate a `.env` file with connection information:
    ```properties
    SQL_CONNECTION_STRING=Server=tcp:your-server.database.windows.net,1433;Initial Catalog=YourDB;User ID=user;Password=pass;Encrypt=True;
-   AKV_KEY_ID=https://your-vault.vault.azure.net/keys/your-key
+   KEY_VAULT_NAME=your-vault-name
    AE_CMK_NAME=CMK_App
-   AE_LOG_DIR=./logs              # optional
-   AE_USE_ONLINE=true             # optional
-   AE_MAX_DOWNTIME=180            # optional, seconds
-   AE_CLEANUP=true                # optional
+   DB_SCHEMA=dbo
+
    ```
+
+   **Note**: `KEY_VAULT_NAME` is just the vault name (e.g., `mt-sql-ae-test-kv`), not the full URL.
 
 ## 🔁 Workflow
 
@@ -118,32 +120,46 @@ The helper module provisions CMKs with `AllowEnclaveComputations`, creates CEKs 
 2. **Migrations**: Create EF migrations as usual (`dotnet ef migrations add ...`). Only schema SQL is required—AE configuration is now model-driven.
 3. **Deploy Schema**: Apply EF migrations to your database (`dotnet ef database update` or migration bundle).
 4. **Deploy Always Encrypted**:
-   - Local testing: `pwsh scripts/run-ae-local-deployment.ps1`
-   - CI/CD: invoke `scripts/run-ae-model-deployment.ps1` with the required parameters.
+   - Local testing: `pwsh scripts/run-ae-local-deployment.ps1 -ProjectPath './SQL_AE_Test/SQL_AE_Test.csproj'`
+   - With cleanup: `pwsh scripts/run-ae-local-deployment.ps1 -ProjectPath './SQL_AE_Test/SQL_AE_Test.csproj' -Clean`
+   - CI/CD: 
+     ```bash
+     # Generate targets JSON
+     dotnet run --project SQL_AE_Test/SQL_AE_Test.csproj -- ae-dump-targets --output targets.json
+     # Deploy with the JSON file
+     pwsh scripts/run-ae-model-deployment.ps1 -ConnectionString $env:SQL_CONNECTION_STRING -KeyVaultName $env:KEY_VAULT_NAME -CmkName $env:AE_CMK_NAME -AeTargetsJsonFile 'targets.json' -DbSchema 'dbo' -Cleanup
+     ```
 
-### Per-Migration PowerShell Sidecars
+### Migration JSON Sidecars
 
-- `AeMigrationsScaffolder` still generates `*_AE.ps1` sidecars next to every EF migration.
-- Each sidecar now leverages the same model-driven discovery logic as the deployment script, ensuring history files always reflect the latest desired encryption state.
-- During development you can rerun a specific sidecar to restore encryption for that migration or compare the generated targets between commits.
+- `AeMigrationsScaffolder` generates `*.json` files next to each EF migration containing AE targets.
+- Each sidecar reflects the model state at migration creation time.
+- Use for history tracking or rollback scenarios.
 
 The deployment script is safe to rerun. It encrypts columns that require protection, decrypts columns that became plain, and (when `-Cleanup` is specified) removes unused CEKs and CMKs.
 
 ## 🛠️ PowerShell Usage
 
 ```powershell
-# Direct invocation
+# Direct invocation with JSON file
 pwsh scripts/run-ae-model-deployment.ps1 \
-    -ProjectPath ./SQL_AE_Test/SQL_AE_Test.csproj \ 
-    -ConnectionString $env:SQL_CONNECTION_STRING \
-    -AkvKeyId $env:AKV_KEY_ID \
-    -CmkName $env:AE_CMK_NAME \
+    -ConnectionString 'sql-connection-string' \
+    -KeyVaultName 'your-vault-name' \
+    -CmkName 'CMK_App' \
+    -AeTargetsJsonFile 'targets.json' \
+    -DbSchema 'dbo' \
     -UseOnlineApproach \
     -MaxDowntimeInSeconds 180 \
     -Cleanup
 ```
 
-The script logs progress, including verification that the CMK supports enclave computations. Cleanup output lists decrypted columns and removed keys.
+**Key Naming Convention:**
+- Use `CMK_{Schema}_{Purpose}` for schema-isolated microservices
+- Examples: `CMK_DBO_App`, `CMK_Orders_App`, `CMK_Inventory_App`
+- The same name is used for both the database CMK metadata and the Azure Key Vault key
+- Supports underscores `_` and hyphens `-` in names
+
+The script logs progress and cleanup output shows removed CEKs and CMKs.
 
 ## 📚 Additional Resources
 

@@ -8,7 +8,7 @@
 //         migrationsAssembly: sp.GetRequiredService<IMigrationsAssembly>(),
 //         current: sp.GetRequiredService<ICurrentDbContext>()));
 
-using System.Text;
+using System.Text.Json;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
 using Microsoft.EntityFrameworkCore.Migrations;
@@ -17,7 +17,7 @@ using Microsoft.EntityFrameworkCore.Migrations.Design;
 namespace SQL_AE_Test.Data.Infrastructure
 {
     /// <summary>
-    /// Wraps EF Core's scaffolder to emit a PowerShell sidecar per migration that applies Always Encrypted.
+    /// Wraps EF Core's scaffolder to emit a JSON sidecar per migration containing Always Encrypted targets.
     /// Reads AE data from the CURRENT model (annotations added by your convention), not from migration ops.
     /// </summary>
     public sealed class AeMigrationsScaffolder : IMigrationsScaffolder
@@ -50,62 +50,15 @@ namespace SQL_AE_Test.Data.Infrastructure
             }
         }
 
-        private static string GeneratePowerShell(string migrationId, IReadOnlyList<AeColumnTarget> targets)
+        private static string GenerateAeTargetsJson(IReadOnlyList<AeColumnTarget> targets)
         {
-            var sb = new StringBuilder();
-
-            sb.AppendLine(@"param(
-  [Parameter(Mandatory=$true)] [string] $ConnectionString,
-  [Parameter(Mandatory=$true)] [string] $AkvKeyId,
-  [Parameter(Mandatory=$true)] [string] $ScriptRoot,
-  [Parameter(Mandatory=$true)] [string] $CmkName,
-  [switch] $UseOnlineApproach,
-  [int] $MaxDowntimeInSeconds = 180,
-  [string] $LogFileDirectory = $null,
-  [switch] $Cleanup
-)
-
-# Import the shared AE helper module from scripts folder
-$moduleFile = Join-Path $ScriptRoot 'scripts' 'AE-Helper.psm1'
-Import-Module $moduleFile -Force
-
-# Convert targets to the format expected by the shared function
-$aeTargets = @(");
-
-            foreach (var t in targets)
+            var options = new JsonSerializerOptions
             {
-                var cekValue = string.IsNullOrWhiteSpace(t.CekName) ? "$null" : $"'{t.CekName}'";
-                sb.AppendLine($"  @{{ Schema = '{t.Schema}'; Table = '{t.Table}'; Column = '{t.Column}'; EncryptionType = '{t.EncryptionType}'; CekName = {cekValue} }}");
-            }
+                WriteIndented = true,
+                PropertyNamingPolicy = null
+            };
 
-            sb.AppendLine(@")
-
-# Call the shared AE function with all parameters
-$params = @{
-  ConnectionString = $ConnectionString
-  AkvKeyId = $AkvKeyId
-  MigrationId = '" + migrationId + @"'
-  CmkName = $CmkName
-}
-
-# Add AeTargets only if not empty to avoid parameter binding issues
-if ($aeTargets.Count -gt 0) {
-  $params.AeTargets = $aeTargets
-}
-
-if ($UseOnlineApproach) { $params.UseOnlineApproach = $true }
-if ($MaxDowntimeInSeconds -ne 180) { $params.MaxDowntimeInSeconds = $MaxDowntimeInSeconds }
-if ($LogFileDirectory) { $params.LogFileDirectory = $LogFileDirectory }
-
-Invoke-AlwaysEncryptedMigration @params
-
-if ($Cleanup) {
-  Write-Host ""
-  Write-Host ""🧹 Running cleanup for orphaned Always Encrypted objects..."" -ForegroundColor Cyan
-  Remove-OrphanedAlwaysEncryptedObjects -ConnectionString $ConnectionString -CurrentAeTargets $aeTargets
-}");
-
-            return sb.ToString();
+            return JsonSerializer.Serialize(targets, options);
         }
 
         public ScaffoldedMigration ScaffoldMigration(
@@ -159,7 +112,7 @@ if ($Cleanup) {
 
             // Only emit sidecar when not a dry-run (and we have a concrete migration path)
             if (dryRun) {
-                WriteDebug("Dry run, skipping PowerShell generation");
+                WriteDebug("Dry run, skipping JSON generation");
                 return files;
             }
 
@@ -175,21 +128,21 @@ if ($Cleanup) {
                 var columnTargets = AeColumnTargetDiscovery.FromModel(currentModel);
                 WriteDebug($"Found {columnTargets.Count} AE targets from model");
                 
-                // Always generate PowerShell sidecar (even with no targets or AE column changes) to ensure cleanup runs
+                // Always generate JSON sidecar (even with no targets) to represent the desired AE state
                 // Find where the migration file was saved; write sidecar next to it
                 var migrationFile = files.MigrationFile;
                 var folder = Path.GetDirectoryName(migrationFile) ?? outputDir ?? projectDir ?? ".";
-                var sidecarPath = Path.Combine(folder, $"{migration.MigrationId}_AE.ps1");
+                var sidecarPath = Path.Combine(folder, $"{migration.MigrationId}_AE.json");
 
-                WriteDebug($"Writing PowerShell sidecar to: {sidecarPath} (with {columnTargets.Count} AE targets)");
-                File.WriteAllText(sidecarPath, GeneratePowerShell(migration.MigrationId, columnTargets));
-                WriteDebug("PowerShell sidecar written successfully!");
+                WriteDebug($"Writing JSON sidecar to: {sidecarPath} (with {columnTargets.Count} AE targets)");
+                File.WriteAllText(sidecarPath, GenerateAeTargetsJson(columnTargets));
+                WriteDebug("JSON sidecar written successfully!");
                 
                 return files;
             }
             catch (Exception ex)
             {
-                WriteDebug($"ERROR generating PowerShell sidecar: {ex.Message}");
+                WriteDebug($"ERROR generating JSON sidecar: {ex.Message}");
                 WriteDebug($"Stack trace: {ex.StackTrace}");
                 return files;
             }
@@ -209,18 +162,18 @@ if ($Cleanup) {
                 if (dir is null) return;
 
                 var migrationBase = Path.GetFileNameWithoutExtension(migrationFilePath); // e.g., 20250907123456_AddX
-                var sidecar = Path.Combine(dir, $"{migrationBase}_AE.ps1");
+                var sidecar = Path.Combine(dir, $"{migrationBase}_AE.json");
                 if (File.Exists(sidecar))
                 {
                     File.Delete(sidecar);
                 }
                 else
                 {
-                    // Fallback: if MigrationId differs from filename base, try scanning for *_AE.ps1 with same timestamp prefix
+                    // Fallback: if MigrationId differs from filename base, try scanning for *_AE.json with same timestamp prefix
                     var prefix = migrationBase.Split('_').FirstOrDefault();
                     if (!string.IsNullOrWhiteSpace(prefix))
                     {
-                        var candidates = Directory.GetFiles(dir, $"{prefix}_*_AE.ps1");
+                        var candidates = Directory.GetFiles(dir, $"{prefix}_*_AE.json");
                         foreach (var c in candidates) File.Delete(c);
                     }
                 }

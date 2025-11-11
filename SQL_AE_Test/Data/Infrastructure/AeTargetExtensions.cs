@@ -33,6 +33,7 @@ namespace SQL_AE_Test.Data.Infrastructure
         /// </summary>
         /// <example>
         /// dotnet run -- ae-dump-targets
+        /// dotnet run -- ae-dump-targets --output output.json
         /// </example>
         /// <typeparam name="TContext">The DbContext type.</typeparam>
         /// <param name="host">The IHost instance.</param>
@@ -45,7 +46,20 @@ namespace SQL_AE_Test.Data.Infrastructure
                 await using var scope = host.Services.CreateAsyncScope();
                 var dbContext = scope.ServiceProvider.GetRequiredService<TContext>();
                 var json = dbContext.DumpAeTargetsAsJson();
-                Console.WriteLine(json);
+                
+                // Check if --output parameter is provided
+                var outputIndex = Array.IndexOf(args, "--output");
+                if (outputIndex >= 0 && outputIndex + 1 < args.Length)
+                {
+                    var filePath = args[outputIndex + 1];
+                    await File.WriteAllTextAsync(filePath, json);
+                    Console.WriteLine($"AE targets saved to: {filePath}");
+                }
+                else
+                {
+                    Console.WriteLine(json);
+                }
+                
                 return;
             }
 

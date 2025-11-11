@@ -1,0 +1,16 @@
+[
+  {
+    "Schema": "dbo",
+    "Table": "Customers",
+    "Column": "BirthDate",
+    "EncryptionType": "Randomized",
+    "CekName": "CEK_PII"
+  },
+  {
+    "Schema": "dbo",
+    "Table": "Customers",
+    "Column": "SSN",
+    "EncryptionType": "Deterministic",
+    "CekName": "CEK_PII"
+  }
+]

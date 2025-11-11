@@ -12,7 +12,7 @@ using SQL_AE_Test.Data;
 namespace SQL_AE_Test.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    [Migration("20250915113245_InitialCreateWithAlwaysEncrypted")]
+    [Migration("20251111130918_InitialCreateWithAlwaysEncrypted")]
     partial class InitialCreateWithAlwaysEncrypted
     {
         /// <inheritdoc />

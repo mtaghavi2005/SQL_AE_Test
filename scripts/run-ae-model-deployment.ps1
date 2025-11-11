@@ -1,9 +1,9 @@
 #!/usr/bin/env pwsh
 param(
     [Parameter(Mandatory=$true)] [string] $ConnectionString,
-    [Parameter(Mandatory=$true)] [string] $AkvKeyId,
+    [Parameter(Mandatory=$true)] [string] $KeyVaultName,
     [Parameter(Mandatory=$true)] [string] $CmkName,
-    [Parameter(Mandatory=$true)] [string] $ProjectPath,
+    [Parameter(Mandatory=$true)] [string] $AeTargetsJsonFile,
     [Parameter(Mandatory=$true)] [string] $DbSchema,
     [string] $LogFileDirectory = "./logs",
     [switch] $UseOnlineApproach,
@@ -19,30 +19,24 @@ Write-Host "====================================" -ForegroundColor Cyan
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 
 # If relative path, resolve it relative to repo root
-if (-not [System.IO.Path]::IsPathRooted($ProjectPath)) {
-    $projectPath = Join-Path $repoRoot $ProjectPath
+if (-not [System.IO.Path]::IsPathRooted($AeTargetsJsonFile)) {
+    $targetsJsonPath = Join-Path $repoRoot $AeTargetsJsonFile
 } else {
-    $projectPath = $ProjectPath
+    $targetsJsonPath = $AeTargetsJsonFile
 }
 
-if (-not (Test-Path $projectPath)) {
-    throw "Unable to locate project file at $projectPath"
+if (-not (Test-Path $targetsJsonPath)) {
+    throw "Unable to locate targets JSON file at $targetsJsonPath"
 }
 
-Write-Host "📦 Project: $projectPath" -ForegroundColor Gray
+Write-Host "📦 Targets JSON: $targetsJsonPath" -ForegroundColor Gray
 Write-Host ""
 
-$dotnetArgs = @('run', '--project', $projectPath, '--', 'ae-dump-targets')
-Write-Host "📤 Discovering Always Encrypted targets from EF Core model..." -ForegroundColor Green
-$targetsJson = & dotnet @dotnetArgs
-$exitCode = $LASTEXITCODE
-
-if ($exitCode -ne 0) {
-    throw "dotnet run failed while gathering AE targets (exit code $exitCode). Output: $targetsJson"
-}
+Write-Host "📤 Loading Always Encrypted targets from JSON file..." -ForegroundColor Green
+$targetsJson = Get-Content -Path $targetsJsonPath -Raw
 
 if ([string]::IsNullOrWhiteSpace($targetsJson)) {
-    throw "The EF model did not produce any Always Encrypted target information."
+    throw "The targets JSON file is empty."
 }
 
 try {
@@ -51,7 +45,7 @@ try {
         $aeTargets = @($aeTargets)
     }
 } catch {
-    throw "Failed to parse Always Encrypted targets JSON. Details: $($_.Exception.Message). Raw output: $targetsJson"
+    throw "Failed to parse Always Encrypted targets JSON. Details: $($_.Exception.Message)"
 }
 
 Write-Host "  Found $($aeTargets.Count) column targets in model" -ForegroundColor Gray
@@ -66,9 +60,9 @@ Import-Module $modulePath -Force
 
 $invokeArgs = @{
     ConnectionString = $ConnectionString
-    AkvKeyId = $AkvKeyId
-    MigrationId = 'CurrentModelDeployment'
+    KeyVaultName = $KeyVaultName
     AeTargets = $aeTargets
+    DbSchema = $DbSchema    
     CmkName = $CmkName
 }
 
@@ -82,18 +76,13 @@ if ($LogFileDirectory) {
 }
 
 Write-Host "🛠️  Applying model-based Always Encrypted configuration..." -ForegroundColor Green
+
 Invoke-AlwaysEncryptedMigration @invokeArgs
 
 if ($Cleanup) {
     Write-Host ""
     Write-Host "🧹 Running cleanup for orphaned Always Encrypted objects..." -ForegroundColor Cyan
-    $cleanupResult = Remove-OrphanedAlwaysEncryptedObjects -ConnectionString $ConnectionString -CurrentAeTargets $aeTargets -SchemaName $DbSchema
-    if ($cleanupResult) {
-        Write-Host "Cleanup summary:" -ForegroundColor Gray
-        Write-Host "  Decrypted columns: $($cleanupResult.DecryptedColumns -join ', ')" -ForegroundColor Gray
-        Write-Host "  Removed CEKs: $($cleanupResult.RemovedCEKs -join ', ')" -ForegroundColor Gray
-        Write-Host "  Removed CMKs: $($cleanupResult.RemovedCMKs -join ', ')" -ForegroundColor Gray
-    }
+    $cleanupResult = Remove-OrphanedAlwaysEncryptedObjects -ConnectionString $ConnectionString -CurrentAeTargets $aeTargets  -SchemaName $DbSchema
 }
 
 Write-Host ""
